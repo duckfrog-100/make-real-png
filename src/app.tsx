@@ -6,7 +6,9 @@ type AppError = { type: AppErrorType; message: string };
 type BackgroundMode = 'transparent' | 'white' | 'black';
 type DownloadFormat = 'png' | 'webp' | 'jpg';
 type EditTool = 'strength' | 'eraser' | 'restore' | 'crop' | 'padding' | 'filename';
-type ResultRecord = { id: string; batchId: string; originalUrl: string; resultUrl: string; fileName: string; options: ProcessingOptions; createdAt: number };
+type CropSettings = { top: number; right: number; bottom: number; left: number };
+type EditSettings = { activeTool?: EditTool; background?: BackgroundMode; zoom?: boolean; strength?: number; brush?: number; crop?: CropSettings; padding?: number; updatedAt?: number };
+type ResultRecord = { id: string; batchId: string; originalUrl: string; resultUrl: string; fileName: string; options: ProcessingOptions; createdAt: number; editSettings?: EditSettings };
 type AuthUser = { email: string; name: string; createdAt: number };
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
@@ -161,11 +163,13 @@ function saveRecords(records: ResultRecord[]) {
 function readBatch(): ResultRecord[] { const raw = sessionStorage.getItem('make-real-png:last-batch'); if (raw) return JSON.parse(raw) as ResultRecord[]; const single = readRecord(); return single ? [single] : []; }
 function readRecord(id?: string): ResultRecord | null { const key = id ? `make-real-png:result:${id}` : 'make-real-png:last-result'; const raw = sessionStorage.getItem(key); return raw ? (JSON.parse(raw) as ResultRecord) : null; }
 function updateStoredRecord(record: ResultRecord) {
-  sessionStorage.setItem('make-real-png:last-result', JSON.stringify(record));
+  const previousLast = readRecord();
+  if (!previousLast || previousLast.id === record.id) sessionStorage.setItem('make-real-png:last-result', JSON.stringify(record));
   sessionStorage.setItem(`make-real-png:result:${record.id}`, JSON.stringify(record));
   const batch = readBatch().map((item) => item.id === record.id ? record : item);
   sessionStorage.setItem('make-real-png:last-batch', JSON.stringify(batch));
 }
+function withSavedEditSettings(record: ResultRecord, settings: Partial<EditSettings>): ResultRecord { return { ...record, editSettings: { ...record.editSettings, ...settings, updatedAt: Date.now() } }; }
 function saveVault(user: AuthUser) { const batch = readBatch(); localStorage.setItem('make-real-png:user', JSON.stringify(user)); localStorage.setItem(`make-real-png:vault:${user.email}`, JSON.stringify(batch)); }
 function downloadBlob(blob: Blob, fileName: string) { const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = fileName; anchor.click(); URL.revokeObjectURL(url); }
 
@@ -246,14 +250,29 @@ function ResultPage() {
   const navigate = useNavigate();
   const [records, setRecords] = React.useState<ResultRecord[]>(readBatch());
   const [selectedId, setSelectedId] = React.useState(records[0]?.id || '');
-  const [background, setBackground] = React.useState<BackgroundMode>('transparent');
-  const [zoom, setZoom] = React.useState(false);
-  const [activeTool, setActiveTool] = React.useState<EditTool>('strength');
-  const [complete, setComplete] = React.useState(false);
   const selected = records.find((record) => record.id === selectedId) || records[0];
+  const initialSettings = selected?.editSettings;
+  const [background, setBackground] = React.useState<BackgroundMode>(initialSettings?.background || 'transparent');
+  const [zoom, setZoom] = React.useState(initialSettings?.zoom || false);
+  const [activeTool, setActiveTool] = React.useState<EditTool>(initialSettings?.activeTool || 'strength');
+  const [complete, setComplete] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!selected) return;
+    setBackground(selected.editSettings?.background || 'transparent');
+    setZoom(selected.editSettings?.zoom || false);
+    setActiveTool(selected.editSettings?.activeTool || 'strength');
+  }, [selected?.id]);
+
   if (!selected) return <MissingResult />;
+
   const updateSelected = (record: ResultRecord) => { updateStoredRecord(record); setRecords((items) => items.map((item) => item.id === record.id ? record : item)); };
-  return <main className="min-h-screen bg-slate-50 px-5 py-8"><div className="mx-auto max-w-7xl"><header className="flex flex-col justify-between gap-4 md:flex-row md:items-center"><div><p className="font-bold text-blue-600">배경 제거 완료</p><h1 className="text-3xl font-extrabold">결과 확인 및 다운로드</h1><p className="mt-1 text-slate-500">{records.length}개 결과가 보관 대기 중입니다.</p></div><div className="flex flex-wrap gap-2"><Link to="/auth" className="rounded-2xl bg-slate-950 px-5 py-3 font-bold text-white">회원가입/로그인하고 결과 보관</Link><button onClick={() => navigate('/')} className="rounded-2xl bg-white px-5 py-3 font-bold shadow">새 이미지 업로드</button></div></header>{records.length > 1 && <ResultStrip records={records} selectedId={selected.id} onSelect={setSelectedId} />}<div className="mt-6 grid gap-6 lg:grid-cols-[1fr_380px]"><section className="space-y-6"><CompareSlider originalUrl={selected.originalUrl} resultUrl={selected.resultUrl} background={background} zoom={zoom} /><BackgroundPreviewToggle value={background} onChange={setBackground} zoom={zoom} onZoom={setZoom} /><EditToolbar activeTool={activeTool} onAction={setActiveTool} /><EditPanel record={selected} activeTool={activeTool} onUpdate={updateSelected} /><div className="flex flex-wrap gap-3"><button onClick={() => navigate('/')} className="rounded-2xl border bg-white px-5 py-3 font-bold">다시 처리하기</button><button onClick={() => navigate('/')} className="rounded-2xl border bg-white px-5 py-3 font-bold">새 이미지 업로드</button></div></section><aside className="space-y-6"><DownloadPanel record={selected} records={records} onComplete={() => setComplete(true)} /><QRDownloadPanel record={selected} /><CompletionPanel show={complete} onResult={() => setComplete(false)} /></aside></div></div></main>;
+  const saveSelectedSettings = (settings: Partial<EditSettings>) => updateSelected(withSavedEditSettings(selected, settings));
+  const changeBackground = (value: BackgroundMode) => { setBackground(value); saveSelectedSettings({ background: value }); };
+  const changeZoom = (value: boolean) => { setZoom(value); saveSelectedSettings({ zoom: value }); };
+  const changeTool = (tool: EditTool) => { setActiveTool(tool); saveSelectedSettings({ activeTool: tool }); };
+
+  return <main className="min-h-screen bg-slate-50 px-5 py-8"><div className="mx-auto max-w-7xl"><header className="flex flex-col justify-between gap-4 md:flex-row md:items-center"><div><p className="font-bold text-blue-600">배경 제거 완료</p><h1 className="text-3xl font-extrabold">결과 확인 및 다운로드</h1><p className="mt-1 text-slate-500">{records.length}개 결과가 보관 대기 중입니다. 편집값은 적용할 때마다 이 결과에 저장됩니다.</p></div><div className="flex flex-wrap gap-2"><Link to="/auth" className="rounded-2xl bg-slate-950 px-5 py-3 font-bold text-white">회원가입/로그인하고 결과 보관</Link><button onClick={() => navigate('/')} className="rounded-2xl bg-white px-5 py-3 font-bold shadow">새 이미지 업로드</button></div></header>{records.length > 1 && <ResultStrip records={records} selectedId={selected.id} onSelect={setSelectedId} />}<div className="mt-6 grid gap-6 lg:grid-cols-[1fr_380px]"><section className="space-y-6"><CompareSlider originalUrl={selected.originalUrl} resultUrl={selected.resultUrl} background={background} zoom={zoom} /><BackgroundPreviewToggle value={background} onChange={changeBackground} zoom={zoom} onZoom={changeZoom} /><EditToolbar activeTool={activeTool} onAction={changeTool} /><EditPanel record={selected} activeTool={activeTool} onUpdate={updateSelected} /><div className="flex flex-wrap gap-3"><button onClick={() => navigate('/')} className="rounded-2xl border bg-white px-5 py-3 font-bold">다시 처리하기</button><button onClick={() => navigate('/')} className="rounded-2xl border bg-white px-5 py-3 font-bold">새 이미지 업로드</button></div></section><aside className="space-y-6"><DownloadPanel record={selected} records={records} onComplete={() => setComplete(true)} /><QRDownloadPanel record={selected} /><CompletionPanel show={complete} onResult={() => setComplete(false)} /></aside></div></div></main>;
 }
 function ResultStrip({ records, selectedId, onSelect }: { records: ResultRecord[]; selectedId: string; onSelect: (id: string) => void }) { return <section className="mt-6 rounded-3xl bg-white p-4 shadow"><h2 className="font-bold">다중 업로드 결과</h2><div className="mt-3 flex gap-3 overflow-x-auto pb-2">{records.map((record, index) => <button key={record.id} onClick={() => onSelect(record.id)} className={`min-w-40 rounded-2xl border p-3 text-left ${record.id === selectedId ? 'border-blue-500 bg-blue-50' : 'border-slate-200'}`}><img src={record.resultUrl} className="checker h-24 w-full rounded-xl object-contain" /><p className="mt-2 truncate text-sm font-bold">{index + 1}. {record.fileName}</p></button>)}</div></section>; }
 function CompareSlider({ originalUrl, resultUrl, background, zoom }: { originalUrl: string; resultUrl: string; background: BackgroundMode; zoom: boolean }) { const [split, setSplit] = React.useState(50); const bgClass = background === 'transparent' ? 'checker' : background === 'white' ? 'bg-white' : 'bg-slate-950'; return <div className={`relative overflow-hidden rounded-3xl border border-slate-200 ${bgClass}`}><img src={resultUrl} className={`mx-auto h-[460px] w-full object-contain ${zoom ? 'scale-125' : ''}`} /><div className="absolute inset-0 overflow-hidden" style={{ width: `${split}%` }}><img src={originalUrl} className={`h-[460px] w-full max-w-none object-contain ${zoom ? 'scale-125' : ''}`} /></div><input aria-label="원본 결과 비교 슬라이더" type="range" min="0" max="100" value={split} onChange={(e) => setSplit(Number(e.target.value))} className="absolute bottom-5 left-1/2 w-3/4 -translate-x-1/2" /><span className="absolute left-4 top-4 rounded-full bg-white px-3 py-1 text-sm font-bold">원본</span><span className="absolute right-4 top-4 rounded-full bg-white px-3 py-1 text-sm font-bold">결과</span></div>; }
@@ -261,18 +280,34 @@ function BackgroundPreviewToggle({ value, onChange, zoom, onZoom }: { value: Bac
 function EditToolbar({ activeTool, onAction }: { activeTool: EditTool; onAction: (tool: EditTool) => void }) { return <div className="rounded-3xl bg-white p-4 shadow"><h2 className="font-bold">간단 편집 UI</h2><div className="mt-3 grid gap-2 sm:grid-cols-3">{(Object.keys(toolLabels) as EditTool[]).map((tool) => <button key={tool} onClick={() => onAction(tool)} className={`rounded-xl border px-4 py-3 font-semibold hover:bg-slate-50 ${activeTool === tool ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-slate-200'}`}>{toolLabels[tool]}</button>)}</div></div>; }
 
 function EditPanel({ record, activeTool, onUpdate }: { record: ResultRecord; activeTool: EditTool; onUpdate: (record: ResultRecord) => void }) {
-  const [value, setValue] = React.useState(record.options.strength);
-  const [brush, setBrush] = React.useState(34);
-  const [crop, setCrop] = React.useState({ top: 0, right: 0, bottom: 0, left: 0 });
-  const [padding, setPadding] = React.useState(40);
+  const savedCrop = record.editSettings?.crop || { top: 0, right: 0, bottom: 0, left: 0 };
+  const [value, setValue] = React.useState(record.editSettings?.strength || record.options.strength);
+  const [brush, setBrush] = React.useState(record.editSettings?.brush || 34);
+  const [crop, setCrop] = React.useState<CropSettings>(savedCrop);
+  const [padding, setPadding] = React.useState(record.editSettings?.padding ?? 40);
   const [name, setName] = React.useState(record.fileName);
   const [busy, setBusy] = React.useState(false);
-  const apply = async (job: () => Promise<ResultRecord>) => { setBusy(true); try { onUpdate(await job()); } finally { setBusy(false); } };
-  if (activeTool === 'strength') return <section className="rounded-3xl bg-white p-5 shadow"><h3 className="font-extrabold">배경 제거 강도 조정</h3><p className="mt-2 text-sm text-slate-500">값이 높을수록 가장자리와 배경색을 더 넓게 제거합니다.</p><input type="range" min="18" max="70" value={value} onChange={(e) => setValue(Number(e.target.value))} className="mt-4 w-full" /><button disabled={busy} onClick={() => apply(async () => ({ ...record, options: { ...record.options, strength: value }, resultUrl: await rebuildWithStrength(record.originalUrl, { ...record.options, strength: value }) }))} className="mt-3 rounded-2xl bg-blue-600 px-5 py-3 font-bold text-white">강도 {value}로 다시 적용</button></section>;
-  if (activeTool === 'eraser' || activeTool === 'restore') return <BrushEditor record={record} mode={activeTool} brush={brush} onBrush={setBrush} onUpdate={onUpdate} />;
-  if (activeTool === 'crop') return <section className="rounded-3xl bg-white p-5 shadow"><h3 className="font-extrabold">이미지 자르기</h3><div className="mt-3 grid grid-cols-2 gap-2">{(['top', 'right', 'bottom', 'left'] as const).map((side) => <label key={side} className="rounded-xl bg-slate-50 p-3 text-sm font-semibold">{side}<input type="number" min="0" value={crop[side]} onChange={(e) => setCrop({ ...crop, [side]: Math.max(0, Number(e.target.value)) })} className="mt-1 w-full rounded-lg border p-2" /></label>)}</div><button disabled={busy} onClick={() => apply(async () => ({ ...record, resultUrl: await cropImage(record.resultUrl, crop) }))} className="mt-3 rounded-2xl bg-blue-600 px-5 py-3 font-bold text-white">자르기 적용</button></section>;
-  if (activeTool === 'padding') return <section className="rounded-3xl bg-white p-5 shadow"><h3 className="font-extrabold">여백 추가/제거</h3><label className="mt-3 block text-sm font-semibold">추가할 투명 여백 {padding}px<input type="range" min="0" max="240" value={padding} onChange={(e) => setPadding(Number(e.target.value))} className="mt-2 w-full" /></label><div className="mt-3 flex flex-wrap gap-2"><button disabled={busy} onClick={() => apply(async () => ({ ...record, resultUrl: await padImage(record.resultUrl, padding) }))} className="rounded-2xl bg-blue-600 px-5 py-3 font-bold text-white">여백 추가</button><button disabled={busy} onClick={() => apply(async () => ({ ...record, resultUrl: await trimImage(record.resultUrl) }))} className="rounded-2xl bg-slate-900 px-5 py-3 font-bold text-white">투명 여백 제거</button></div></section>;
-  return <section className="rounded-3xl bg-white p-5 shadow"><h3 className="font-extrabold">파일명 수정</h3><input value={name} onChange={(e) => setName(e.target.value)} className="mt-3 w-full rounded-xl border p-3" /><button onClick={() => onUpdate({ ...record, fileName: name.trim() || record.fileName })} className="mt-3 rounded-2xl bg-blue-600 px-5 py-3 font-bold text-white">파일명 저장</button></section>;
+  const [savedMessage, setSavedMessage] = React.useState('');
+
+  React.useEffect(() => {
+    setValue(record.editSettings?.strength || record.options.strength);
+    setBrush(record.editSettings?.brush || 34);
+    setCrop(record.editSettings?.crop || { top: 0, right: 0, bottom: 0, left: 0 });
+    setPadding(record.editSettings?.padding ?? 40);
+    setName(record.fileName);
+    setSavedMessage('');
+  }, [record.id]);
+
+  const finishUpdate = (nextRecord: ResultRecord, message: string) => { onUpdate(nextRecord); setSavedMessage(message); };
+  const apply = async (job: () => Promise<ResultRecord>, message = '편집이 결과 이미지에 적용되어 저장되었습니다.') => { setBusy(true); setSavedMessage(''); try { finishUpdate(await job(), message); } finally { setBusy(false); } };
+  const rememberSettings = (settings: Partial<EditSettings>) => { onUpdate(withSavedEditSettings(record, settings)); setSavedMessage('설정값을 저장했습니다.'); };
+  const savedNotice = savedMessage ? <p className="mt-3 rounded-xl bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-700">{savedMessage}</p> : null;
+
+  if (activeTool === 'strength') return <section className="rounded-3xl bg-white p-5 shadow"><h3 className="font-extrabold">배경 제거 강도 조정</h3><p className="mt-2 text-sm text-slate-500">값을 움직인 뒤 적용하면 결과 이미지가 다시 만들어지고 다운로드/QR에도 반영됩니다.</p><input type="range" min="18" max="70" value={value} onChange={(e) => setValue(Number(e.target.value))} className="mt-4 w-full" /><div className="mt-3 flex flex-wrap gap-2"><button disabled={busy} onClick={() => apply(async () => withSavedEditSettings({ ...record, options: { ...record.options, strength: value }, resultUrl: await rebuildWithStrength(record.originalUrl, { ...record.options, strength: value }) }, { strength: value }))} className="rounded-2xl bg-blue-600 px-5 py-3 font-bold text-white disabled:bg-slate-300">강도 {value}로 적용하고 저장</button><button disabled={busy} onClick={() => rememberSettings({ strength: value })} className="rounded-2xl bg-white px-5 py-3 font-bold text-slate-900 ring-1 ring-slate-200 disabled:text-slate-400">값만 저장</button></div>{savedNotice}</section>;
+  if (activeTool === 'eraser' || activeTool === 'restore') return <BrushEditor record={record} mode={activeTool} brush={brush} onBrush={(nextBrush) => { setBrush(nextBrush); rememberSettings({ brush: nextBrush }); }} onUpdate={onUpdate} />;
+  if (activeTool === 'crop') return <section className="rounded-3xl bg-white p-5 shadow"><h3 className="font-extrabold">이미지 자르기</h3><div className="mt-3 grid grid-cols-2 gap-2">{(['top', 'right', 'bottom', 'left'] as const).map((side) => <label key={side} className="rounded-xl bg-slate-50 p-3 text-sm font-semibold">{side}<input type="number" min="0" value={crop[side]} onChange={(e) => setCrop({ ...crop, [side]: Math.max(0, Number(e.target.value)) })} className="mt-1 w-full rounded-lg border p-2" /></label>)}</div><div className="mt-3 flex flex-wrap gap-2"><button disabled={busy} onClick={() => apply(async () => withSavedEditSettings({ ...record, resultUrl: await cropImage(record.resultUrl, crop) }, { crop }))} className="rounded-2xl bg-blue-600 px-5 py-3 font-bold text-white disabled:bg-slate-300">자르기 적용하고 저장</button><button disabled={busy} onClick={() => rememberSettings({ crop })} className="rounded-2xl bg-white px-5 py-3 font-bold text-slate-900 ring-1 ring-slate-200 disabled:text-slate-400">값만 저장</button></div>{savedNotice}</section>;
+  if (activeTool === 'padding') return <section className="rounded-3xl bg-white p-5 shadow"><h3 className="font-extrabold">여백 추가/제거</h3><label className="mt-3 block text-sm font-semibold">추가할 투명 여백 {padding}px<input type="range" min="0" max="240" value={padding} onChange={(e) => setPadding(Number(e.target.value))} className="mt-2 w-full" /></label><div className="mt-3 flex flex-wrap gap-2"><button disabled={busy} onClick={() => apply(async () => withSavedEditSettings({ ...record, resultUrl: await padImage(record.resultUrl, padding) }, { padding }))} className="rounded-2xl bg-blue-600 px-5 py-3 font-bold text-white disabled:bg-slate-300">여백 추가하고 저장</button><button disabled={busy} onClick={() => apply(async () => withSavedEditSettings({ ...record, resultUrl: await trimImage(record.resultUrl) }, { padding: 0 }))} className="rounded-2xl bg-slate-900 px-5 py-3 font-bold text-white disabled:bg-slate-300">투명 여백 제거하고 저장</button><button disabled={busy} onClick={() => rememberSettings({ padding })} className="rounded-2xl bg-white px-5 py-3 font-bold text-slate-900 ring-1 ring-slate-200 disabled:text-slate-400">값만 저장</button></div>{savedNotice}</section>;
+  return <section className="rounded-3xl bg-white p-5 shadow"><h3 className="font-extrabold">파일명 수정</h3><input value={name} onChange={(e) => setName(e.target.value)} className="mt-3 w-full rounded-xl border p-3" /><button onClick={() => finishUpdate(withSavedEditSettings({ ...record, fileName: name.trim() || record.fileName }, {}), '파일명을 저장했습니다. 다운로드 파일명에 반영됩니다.')} className="mt-3 rounded-2xl bg-blue-600 px-5 py-3 font-bold text-white">파일명 저장</button>{savedNotice}</section>;
 }
 
 function BrushEditor({ record, mode, brush, onBrush, onUpdate }: { record: ResultRecord; mode: 'eraser' | 'restore'; brush: number; onBrush: (value: number) => void; onUpdate: (record: ResultRecord) => void }) {
@@ -288,7 +323,7 @@ function BrushEditor({ record, mode, brush, onBrush, onUpdate }: { record: Resul
     else { const original = await loadImage(record.originalUrl); ctx.drawImage(original, 0, 0, canvas.width, canvas.height); }
     ctx.restore();
   };
-  const save = async () => { const canvas = canvasRef.current; if (!canvas) return; onUpdate({ ...record, resultUrl: await canvasToObjectUrl(canvas) }); };
+  const save = async () => { const canvas = canvasRef.current; if (!canvas) return; onUpdate(withSavedEditSettings({ ...record, resultUrl: await canvasToObjectUrl(canvas) }, { brush })); };
   return <section className="rounded-3xl bg-white p-5 shadow"><h3 className="font-extrabold">{mode === 'eraser' ? '지우개' : '복원 브러시'}</h3><p className="mt-2 text-sm text-slate-500">캔버스 위에서 드래그해 {mode === 'eraser' ? '투명하게 지우거나' : '원본 픽셀을 되살리고'} 저장하세요.</p><label className="mt-3 block text-sm font-semibold">브러시 크기 {brush}px<input type="range" min="8" max="120" value={brush} onChange={(e) => onBrush(Number(e.target.value))} className="mt-2 w-full" /></label><canvas ref={canvasRef} onPointerDown={(e) => { setDrawing(true); paint(e); }} onPointerMove={(e) => drawing && paint(e)} onPointerUp={() => setDrawing(false)} onPointerLeave={() => setDrawing(false)} className="checker mt-4 max-h-[420px] w-full touch-none rounded-2xl border object-contain" /><button disabled={!ready} onClick={save} className="mt-3 rounded-2xl bg-blue-600 px-5 py-3 font-bold text-white disabled:bg-slate-300">편집 저장</button></section>;
 }
 

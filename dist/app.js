@@ -189,11 +189,14 @@ function readBatch() { const raw = sessionStorage.getItem('make-real-png:last-ba
     return JSON.parse(raw); const single = readRecord(); return single ? [single] : []; }
 function readRecord(id) { const key = id ? `make-real-png:result:${id}` : 'make-real-png:last-result'; const raw = sessionStorage.getItem(key); return raw ? JSON.parse(raw) : null; }
 function updateStoredRecord(record) {
-    sessionStorage.setItem('make-real-png:last-result', JSON.stringify(record));
+    const previousLast = readRecord();
+    if (!previousLast || previousLast.id === record.id)
+        sessionStorage.setItem('make-real-png:last-result', JSON.stringify(record));
     sessionStorage.setItem(`make-real-png:result:${record.id}`, JSON.stringify(record));
     const batch = readBatch().map((item) => item.id === record.id ? record : item);
     sessionStorage.setItem('make-real-png:last-batch', JSON.stringify(batch));
 }
+function withSavedEditSettings(record, settings) { return { ...record, editSettings: { ...record.editSettings, ...settings, updatedAt: Date.now() } }; }
 function saveVault(user) { const batch = readBatch(); localStorage.setItem('make-real-png:user', JSON.stringify(user)); localStorage.setItem(`make-real-png:vault:${user.email}`, JSON.stringify(batch)); }
 function downloadBlob(blob, fileName) { const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = fileName; anchor.click(); URL.revokeObjectURL(url); }
 const APP_BASENAME = window.location.pathname.split('/').filter(Boolean)[0] === 'make-real-png' ? '/make-real-png' : '';
@@ -330,14 +333,26 @@ function ResultPage() {
     const navigate = useNavigate();
     const [records, setRecords] = React.useState(readBatch());
     const [selectedId, setSelectedId] = React.useState(records[0]?.id || '');
-    const [background, setBackground] = React.useState('transparent');
-    const [zoom, setZoom] = React.useState(false);
-    const [activeTool, setActiveTool] = React.useState('strength');
-    const [complete, setComplete] = React.useState(false);
     const selected = records.find((record) => record.id === selectedId) || records[0];
+    const initialSettings = selected?.editSettings;
+    const [background, setBackground] = React.useState(initialSettings?.background || 'transparent');
+    const [zoom, setZoom] = React.useState(initialSettings?.zoom || false);
+    const [activeTool, setActiveTool] = React.useState(initialSettings?.activeTool || 'strength');
+    const [complete, setComplete] = React.useState(false);
+    React.useEffect(() => {
+        if (!selected)
+            return;
+        setBackground(selected.editSettings?.background || 'transparent');
+        setZoom(selected.editSettings?.zoom || false);
+        setActiveTool(selected.editSettings?.activeTool || 'strength');
+    }, [selected?.id]);
     if (!selected)
         return React.createElement(MissingResult, null);
     const updateSelected = (record) => { updateStoredRecord(record); setRecords((items) => items.map((item) => item.id === record.id ? record : item)); };
+    const saveSelectedSettings = (settings) => updateSelected(withSavedEditSettings(selected, settings));
+    const changeBackground = (value) => { setBackground(value); saveSelectedSettings({ background: value }); };
+    const changeZoom = (value) => { setZoom(value); saveSelectedSettings({ zoom: value }); };
+    const changeTool = (tool) => { setActiveTool(tool); saveSelectedSettings({ activeTool: tool }); };
     return React.createElement("main", { className: "min-h-screen bg-slate-50 px-5 py-8" },
         React.createElement("div", { className: "mx-auto max-w-7xl" },
             React.createElement("header", { className: "flex flex-col justify-between gap-4 md:flex-row md:items-center" },
@@ -346,7 +361,7 @@ function ResultPage() {
                     React.createElement("h1", { className: "text-3xl font-extrabold" }, "\uACB0\uACFC \uD655\uC778 \uBC0F \uB2E4\uC6B4\uB85C\uB4DC"),
                     React.createElement("p", { className: "mt-1 text-slate-500" },
                         records.length,
-                        "\uAC1C \uACB0\uACFC\uAC00 \uBCF4\uAD00 \uB300\uAE30 \uC911\uC785\uB2C8\uB2E4.")),
+                        "\uAC1C \uACB0\uACFC\uAC00 \uBCF4\uAD00 \uB300\uAE30 \uC911\uC785\uB2C8\uB2E4. \uD3B8\uC9D1\uAC12\uC740 \uC801\uC6A9\uD560 \uB54C\uB9C8\uB2E4 \uC774 \uACB0\uACFC\uC5D0 \uC800\uC7A5\uB429\uB2C8\uB2E4.")),
                 React.createElement("div", { className: "flex flex-wrap gap-2" },
                     React.createElement(Link, { to: "/auth", className: "rounded-2xl bg-slate-950 px-5 py-3 font-bold text-white" }, "\uD68C\uC6D0\uAC00\uC785/\uB85C\uADF8\uC778\uD558\uACE0 \uACB0\uACFC \uBCF4\uAD00"),
                     React.createElement("button", { onClick: () => navigate('/'), className: "rounded-2xl bg-white px-5 py-3 font-bold shadow" }, "\uC0C8 \uC774\uBBF8\uC9C0 \uC5C5\uB85C\uB4DC"))),
@@ -354,8 +369,8 @@ function ResultPage() {
             React.createElement("div", { className: "mt-6 grid gap-6 lg:grid-cols-[1fr_380px]" },
                 React.createElement("section", { className: "space-y-6" },
                     React.createElement(CompareSlider, { originalUrl: selected.originalUrl, resultUrl: selected.resultUrl, background: background, zoom: zoom }),
-                    React.createElement(BackgroundPreviewToggle, { value: background, onChange: setBackground, zoom: zoom, onZoom: setZoom }),
-                    React.createElement(EditToolbar, { activeTool: activeTool, onAction: setActiveTool }),
+                    React.createElement(BackgroundPreviewToggle, { value: background, onChange: changeBackground, zoom: zoom, onZoom: changeZoom }),
+                    React.createElement(EditToolbar, { activeTool: activeTool, onAction: changeTool }),
                     React.createElement(EditPanel, { record: selected, activeTool: activeTool, onUpdate: updateSelected }),
                     React.createElement("div", { className: "flex flex-wrap gap-3" },
                         React.createElement("button", { onClick: () => navigate('/'), className: "rounded-2xl border bg-white px-5 py-3 font-bold" }, "\uB2E4\uC2DC \uCC98\uB9AC\uD558\uAE30"),
@@ -389,36 +404,55 @@ function EditToolbar({ activeTool, onAction }) { return React.createElement("div
     React.createElement("h2", { className: "font-bold" }, "\uAC04\uB2E8 \uD3B8\uC9D1 UI"),
     React.createElement("div", { className: "mt-3 grid gap-2 sm:grid-cols-3" }, Object.keys(toolLabels).map((tool) => React.createElement("button", { key: tool, onClick: () => onAction(tool), className: `rounded-xl border px-4 py-3 font-semibold hover:bg-slate-50 ${activeTool === tool ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-slate-200'}` }, toolLabels[tool])))); }
 function EditPanel({ record, activeTool, onUpdate }) {
-    const [value, setValue] = React.useState(record.options.strength);
-    const [brush, setBrush] = React.useState(34);
-    const [crop, setCrop] = React.useState({ top: 0, right: 0, bottom: 0, left: 0 });
-    const [padding, setPadding] = React.useState(40);
+    const savedCrop = record.editSettings?.crop || { top: 0, right: 0, bottom: 0, left: 0 };
+    const [value, setValue] = React.useState(record.editSettings?.strength || record.options.strength);
+    const [brush, setBrush] = React.useState(record.editSettings?.brush || 34);
+    const [crop, setCrop] = React.useState(savedCrop);
+    const [padding, setPadding] = React.useState(record.editSettings?.padding ?? 40);
     const [name, setName] = React.useState(record.fileName);
     const [busy, setBusy] = React.useState(false);
-    const apply = async (job) => { setBusy(true); try {
-        onUpdate(await job());
+    const [savedMessage, setSavedMessage] = React.useState('');
+    React.useEffect(() => {
+        setValue(record.editSettings?.strength || record.options.strength);
+        setBrush(record.editSettings?.brush || 34);
+        setCrop(record.editSettings?.crop || { top: 0, right: 0, bottom: 0, left: 0 });
+        setPadding(record.editSettings?.padding ?? 40);
+        setName(record.fileName);
+        setSavedMessage('');
+    }, [record.id]);
+    const finishUpdate = (nextRecord, message) => { onUpdate(nextRecord); setSavedMessage(message); };
+    const apply = async (job, message = '편집이 결과 이미지에 적용되어 저장되었습니다.') => { setBusy(true); setSavedMessage(''); try {
+        finishUpdate(await job(), message);
     }
     finally {
         setBusy(false);
     } };
+    const rememberSettings = (settings) => { onUpdate(withSavedEditSettings(record, settings)); setSavedMessage('설정값을 저장했습니다.'); };
+    const savedNotice = savedMessage ? React.createElement("p", { className: "mt-3 rounded-xl bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-700" }, savedMessage) : null;
     if (activeTool === 'strength')
         return React.createElement("section", { className: "rounded-3xl bg-white p-5 shadow" },
             React.createElement("h3", { className: "font-extrabold" }, "\uBC30\uACBD \uC81C\uAC70 \uAC15\uB3C4 \uC870\uC815"),
-            React.createElement("p", { className: "mt-2 text-sm text-slate-500" }, "\uAC12\uC774 \uB192\uC744\uC218\uB85D \uAC00\uC7A5\uC790\uB9AC\uC640 \uBC30\uACBD\uC0C9\uC744 \uB354 \uB113\uAC8C \uC81C\uAC70\uD569\uB2C8\uB2E4."),
+            React.createElement("p", { className: "mt-2 text-sm text-slate-500" }, "\uAC12\uC744 \uC6C0\uC9C1\uC778 \uB4A4 \uC801\uC6A9\uD558\uBA74 \uACB0\uACFC \uC774\uBBF8\uC9C0\uAC00 \uB2E4\uC2DC \uB9CC\uB4E4\uC5B4\uC9C0\uACE0 \uB2E4\uC6B4\uB85C\uB4DC/QR\uC5D0\uB3C4 \uBC18\uC601\uB429\uB2C8\uB2E4."),
             React.createElement("input", { type: "range", min: "18", max: "70", value: value, onChange: (e) => setValue(Number(e.target.value)), className: "mt-4 w-full" }),
-            React.createElement("button", { disabled: busy, onClick: () => apply(async () => ({ ...record, options: { ...record.options, strength: value }, resultUrl: await rebuildWithStrength(record.originalUrl, { ...record.options, strength: value }) })), className: "mt-3 rounded-2xl bg-blue-600 px-5 py-3 font-bold text-white" },
-                "\uAC15\uB3C4 ",
-                value,
-                "\uB85C \uB2E4\uC2DC \uC801\uC6A9"));
+            React.createElement("div", { className: "mt-3 flex flex-wrap gap-2" },
+                React.createElement("button", { disabled: busy, onClick: () => apply(async () => withSavedEditSettings({ ...record, options: { ...record.options, strength: value }, resultUrl: await rebuildWithStrength(record.originalUrl, { ...record.options, strength: value }) }, { strength: value })), className: "rounded-2xl bg-blue-600 px-5 py-3 font-bold text-white disabled:bg-slate-300" },
+                    "\uAC15\uB3C4 ",
+                    value,
+                    "\uB85C \uC801\uC6A9\uD558\uACE0 \uC800\uC7A5"),
+                React.createElement("button", { disabled: busy, onClick: () => rememberSettings({ strength: value }), className: "rounded-2xl bg-white px-5 py-3 font-bold text-slate-900 ring-1 ring-slate-200 disabled:text-slate-400" }, "\uAC12\uB9CC \uC800\uC7A5")),
+            savedNotice);
     if (activeTool === 'eraser' || activeTool === 'restore')
-        return React.createElement(BrushEditor, { record: record, mode: activeTool, brush: brush, onBrush: setBrush, onUpdate: onUpdate });
+        return React.createElement(BrushEditor, { record: record, mode: activeTool, brush: brush, onBrush: (nextBrush) => { setBrush(nextBrush); rememberSettings({ brush: nextBrush }); }, onUpdate: onUpdate });
     if (activeTool === 'crop')
         return React.createElement("section", { className: "rounded-3xl bg-white p-5 shadow" },
             React.createElement("h3", { className: "font-extrabold" }, "\uC774\uBBF8\uC9C0 \uC790\uB974\uAE30"),
             React.createElement("div", { className: "mt-3 grid grid-cols-2 gap-2" }, ['top', 'right', 'bottom', 'left'].map((side) => React.createElement("label", { key: side, className: "rounded-xl bg-slate-50 p-3 text-sm font-semibold" },
                 side,
                 React.createElement("input", { type: "number", min: "0", value: crop[side], onChange: (e) => setCrop({ ...crop, [side]: Math.max(0, Number(e.target.value)) }), className: "mt-1 w-full rounded-lg border p-2" })))),
-            React.createElement("button", { disabled: busy, onClick: () => apply(async () => ({ ...record, resultUrl: await cropImage(record.resultUrl, crop) })), className: "mt-3 rounded-2xl bg-blue-600 px-5 py-3 font-bold text-white" }, "\uC790\uB974\uAE30 \uC801\uC6A9"));
+            React.createElement("div", { className: "mt-3 flex flex-wrap gap-2" },
+                React.createElement("button", { disabled: busy, onClick: () => apply(async () => withSavedEditSettings({ ...record, resultUrl: await cropImage(record.resultUrl, crop) }, { crop })), className: "rounded-2xl bg-blue-600 px-5 py-3 font-bold text-white disabled:bg-slate-300" }, "\uC790\uB974\uAE30 \uC801\uC6A9\uD558\uACE0 \uC800\uC7A5"),
+                React.createElement("button", { disabled: busy, onClick: () => rememberSettings({ crop }), className: "rounded-2xl bg-white px-5 py-3 font-bold text-slate-900 ring-1 ring-slate-200 disabled:text-slate-400" }, "\uAC12\uB9CC \uC800\uC7A5")),
+            savedNotice);
     if (activeTool === 'padding')
         return React.createElement("section", { className: "rounded-3xl bg-white p-5 shadow" },
             React.createElement("h3", { className: "font-extrabold" }, "\uC5EC\uBC31 \uCD94\uAC00/\uC81C\uAC70"),
@@ -428,12 +462,15 @@ function EditPanel({ record, activeTool, onUpdate }) {
                 "px",
                 React.createElement("input", { type: "range", min: "0", max: "240", value: padding, onChange: (e) => setPadding(Number(e.target.value)), className: "mt-2 w-full" })),
             React.createElement("div", { className: "mt-3 flex flex-wrap gap-2" },
-                React.createElement("button", { disabled: busy, onClick: () => apply(async () => ({ ...record, resultUrl: await padImage(record.resultUrl, padding) })), className: "rounded-2xl bg-blue-600 px-5 py-3 font-bold text-white" }, "\uC5EC\uBC31 \uCD94\uAC00"),
-                React.createElement("button", { disabled: busy, onClick: () => apply(async () => ({ ...record, resultUrl: await trimImage(record.resultUrl) })), className: "rounded-2xl bg-slate-900 px-5 py-3 font-bold text-white" }, "\uD22C\uBA85 \uC5EC\uBC31 \uC81C\uAC70")));
+                React.createElement("button", { disabled: busy, onClick: () => apply(async () => withSavedEditSettings({ ...record, resultUrl: await padImage(record.resultUrl, padding) }, { padding })), className: "rounded-2xl bg-blue-600 px-5 py-3 font-bold text-white disabled:bg-slate-300" }, "\uC5EC\uBC31 \uCD94\uAC00\uD558\uACE0 \uC800\uC7A5"),
+                React.createElement("button", { disabled: busy, onClick: () => apply(async () => withSavedEditSettings({ ...record, resultUrl: await trimImage(record.resultUrl) }, { padding: 0 })), className: "rounded-2xl bg-slate-900 px-5 py-3 font-bold text-white disabled:bg-slate-300" }, "\uD22C\uBA85 \uC5EC\uBC31 \uC81C\uAC70\uD558\uACE0 \uC800\uC7A5"),
+                React.createElement("button", { disabled: busy, onClick: () => rememberSettings({ padding }), className: "rounded-2xl bg-white px-5 py-3 font-bold text-slate-900 ring-1 ring-slate-200 disabled:text-slate-400" }, "\uAC12\uB9CC \uC800\uC7A5")),
+            savedNotice);
     return React.createElement("section", { className: "rounded-3xl bg-white p-5 shadow" },
         React.createElement("h3", { className: "font-extrabold" }, "\uD30C\uC77C\uBA85 \uC218\uC815"),
         React.createElement("input", { value: name, onChange: (e) => setName(e.target.value), className: "mt-3 w-full rounded-xl border p-3" }),
-        React.createElement("button", { onClick: () => onUpdate({ ...record, fileName: name.trim() || record.fileName }), className: "mt-3 rounded-2xl bg-blue-600 px-5 py-3 font-bold text-white" }, "\uD30C\uC77C\uBA85 \uC800\uC7A5"));
+        React.createElement("button", { onClick: () => finishUpdate(withSavedEditSettings({ ...record, fileName: name.trim() || record.fileName }, {}), '파일명을 저장했습니다. 다운로드 파일명에 반영됩니다.'), className: "mt-3 rounded-2xl bg-blue-600 px-5 py-3 font-bold text-white" }, "\uD30C\uC77C\uBA85 \uC800\uC7A5"),
+        savedNotice);
 }
 function BrushEditor({ record, mode, brush, onBrush, onUpdate }) {
     const canvasRef = React.useRef(null);
@@ -463,7 +500,7 @@ function BrushEditor({ record, mode, brush, onBrush, onUpdate }) {
         ctx.restore();
     };
     const save = async () => { const canvas = canvasRef.current; if (!canvas)
-        return; onUpdate({ ...record, resultUrl: await canvasToObjectUrl(canvas) }); };
+        return; onUpdate(withSavedEditSettings({ ...record, resultUrl: await canvasToObjectUrl(canvas) }, { brush })); };
     return React.createElement("section", { className: "rounded-3xl bg-white p-5 shadow" },
         React.createElement("h3", { className: "font-extrabold" }, mode === 'eraser' ? '지우개' : '복원 브러시'),
         React.createElement("p", { className: "mt-2 text-sm text-slate-500" },
