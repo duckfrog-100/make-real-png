@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "lib": [
+      "ES2020",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "strict": true,
+    "skipLibCheck": true,
+    "module": "none",
+    "jsx": "react",
+    "jsxFactory": "React.createElement",
+    "outFile": "dist/app.js",
+    "rootDir": "src",
+    "ignoreDeprecations": "6.0",
+    "noImplicitAny": false
+  },
+  "include": [
+    "src/**/*.tsx",
+    "src/**/*.ts"
+  ],
+  "exclude": [
+    "src/main.tsx",
+    "src/types.ts",
+    "src/lib/**/*"
+  ]
+}

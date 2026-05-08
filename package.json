@@ -1,0 +1,13 @@
+{
+  "name": "make-real-png",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.app.json",
+    "dev": "npm run build && python3 -m http.server 5173",
+    "preview": "python3 -m http.server 4173"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
