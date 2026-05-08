@@ -2,6 +2,8 @@ declare const React: {
   createElement: (...args: any[]) => any;
   StrictMode: (props: { children?: any }) => any;
   useMemo: <T>(factory: () => T, deps: any[]) => T;
+  useEffect: (effect: () => void | (() => void), deps?: any[]) => void;
+  useRef: <T>(initialValue: T) => { current: T };
   useState: <T>(initialState: T | (() => T)) => [T, (value: T | ((previous: T) => T)) => void];
 };
 
