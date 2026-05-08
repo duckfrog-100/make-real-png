@@ -24,18 +24,155 @@ function validateFile(file: File): AppError | null {
 }
 
 const wait = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
+const BACKGROUND_SAMPLE_STRIDE = 6;
+const BACKGROUND_COLOR_BUCKET = 16;
+const CHECKER_LIGHT_THRESHOLD = 220;
+const CHECKER_NEUTRAL_THRESHOLD = 22;
+
+type RgbColor = { r: number; g: number; b: number };
+
 async function removeBackground(file: File, options: ProcessingOptions, onStageChange?: (stage: ProcessingStage) => void): Promise<string> {
   const steps: Array<{ stage: ProcessingStage; delay: number }> = [
     { stage: 'uploading', delay: 700 }, { stage: 'analyzing', delay: 900 }, { stage: 'removing', delay: 1100 }, { stage: 'generating', delay: 800 },
   ];
-  for (const step of steps) { onStageChange?.(step.stage); await wait(step.delay); }
-  // TODO: 실제 서비스에서는 이 지점에서 AI 배경 제거 API를 호출하고 서버 저장 URL을 반환합니다.
-  void options;
+  let resultUrl = '';
+  for (const step of steps) {
+    onStageChange?.(step.stage);
+    if (step.stage === 'removing') resultUrl = await removeBackgroundLocally(file, options);
+    await wait(step.delay);
+  }
   onStageChange?.('done');
-  return URL.createObjectURL(file);
+  return resultUrl;
 }
+
 function loadImage(imageUrl: string): Promise<HTMLImageElement> { return new Promise((resolve, reject) => { const image = new Image(); image.crossOrigin = 'anonymous'; image.onload = () => resolve(image); image.onerror = () => reject(new Error('이미지를 불러오지 못했습니다.')); image.src = imageUrl; }); }
-async function generateDownloadBlob(imageUrl: string, format: DownloadFormat): Promise<Blob> { const image = await loadImage(imageUrl); const canvas = document.createElement('canvas'); canvas.width = image.naturalWidth || image.width; canvas.height = image.naturalHeight || image.height; const context = canvas.getContext('2d'); if (!context) throw new Error('Canvas를 생성할 수 없습니다.'); if (format === 'jpg') { context.fillStyle = '#ffffff'; context.fillRect(0, 0, canvas.width, canvas.height); } context.drawImage(image, 0, 0); const mimeType = format === 'jpg' ? 'image/jpeg' : `image/${format}`; return new Promise((resolve, reject) => { canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error('다운로드 파일 생성에 실패했습니다.')), mimeType, 0.95); }); }
+async function loadFileImage(file: File) { const url = URL.createObjectURL(file); try { return await loadImage(url); } finally { URL.revokeObjectURL(url); } }
+function imageDataToBlob(canvas: HTMLCanvasElement, type = 'image/png', quality?: number): Promise<Blob> { return new Promise((resolve, reject) => { canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error('이미지 파일 생성에 실패했습니다.')), type, quality); }); }
+
+async function removeBackgroundLocally(file: File, options: ProcessingOptions): Promise<string> {
+  const image = await loadFileImage(file);
+  const sourceCanvas = document.createElement('canvas');
+  sourceCanvas.width = image.naturalWidth || image.width;
+  sourceCanvas.height = image.naturalHeight || image.height;
+  const sourceContext = sourceCanvas.getContext('2d');
+  if (!sourceContext) throw new Error('Canvas를 생성할 수 없습니다.');
+  sourceContext.drawImage(image, 0, 0);
+  const imageData = sourceContext.getImageData(0, 0, sourceCanvas.width, sourceCanvas.height);
+  const backgroundColors = detectBackgroundColors(imageData);
+  const backgroundMask = createBackgroundMask(imageData, backgroundColors);
+  applyTransparency(imageData, backgroundMask, options.smoothEdges);
+  const outputCanvas = options.autoTrim && !options.keepOriginalSize ? trimTransparentPixels(imageData) : sourceCanvas;
+  const outputContext = outputCanvas.getContext('2d');
+  if (!outputContext) throw new Error('Canvas를 생성할 수 없습니다.');
+  if (outputCanvas === sourceCanvas) {
+    outputContext.putImageData(imageData, 0, 0);
+  }
+  const blob = await imageDataToBlob(outputCanvas);
+  return URL.createObjectURL(blob);
+}
+
+function detectBackgroundColors(imageData: ImageData): RgbColor[] {
+  const { data, width, height } = imageData;
+  const counts = new Map<string, { color: RgbColor; count: number }>();
+  const addSample = (x: number, y: number) => {
+    const index = (y * width + x) * 4;
+    const color = { r: data[index], g: data[index + 1], b: data[index + 2] };
+    const key = `${Math.round(color.r / BACKGROUND_COLOR_BUCKET)},${Math.round(color.g / BACKGROUND_COLOR_BUCKET)},${Math.round(color.b / BACKGROUND_COLOR_BUCKET)}`;
+    const current = counts.get(key);
+    counts.set(key, { color, count: (current?.count || 0) + 1 });
+  };
+  for (let x = 0; x < width; x += BACKGROUND_SAMPLE_STRIDE) { addSample(x, 0); addSample(x, height - 1); }
+  for (let y = 0; y < height; y += BACKGROUND_SAMPLE_STRIDE) { addSample(0, y); addSample(width - 1, y); }
+  return [...counts.values()].sort((a, b) => b.count - a.count).slice(0, 8).map(({ color }) => color);
+}
+
+function createBackgroundMask(imageData: ImageData, backgroundColors: RgbColor[]) {
+  const { width, height } = imageData;
+  const visited = new Uint8Array(width * height);
+  const queue: number[] = [];
+  const enqueue = (x: number, y: number) => {
+    if (x < 0 || y < 0 || x >= width || y >= height) return;
+    const pixel = y * width + x;
+    if (visited[pixel] || !isBackgroundPixel(imageData, pixel, backgroundColors)) return;
+    visited[pixel] = 1;
+    queue.push(pixel);
+  };
+  for (let x = 0; x < width; x += 1) { enqueue(x, 0); enqueue(x, height - 1); }
+  for (let y = 0; y < height; y += 1) { enqueue(0, y); enqueue(width - 1, y); }
+  for (let cursor = 0; cursor < queue.length; cursor += 1) {
+    const pixel = queue[cursor];
+    const x = pixel % width;
+    const y = Math.floor(pixel / width);
+    enqueue(x + 1, y); enqueue(x - 1, y); enqueue(x, y + 1); enqueue(x, y - 1);
+  }
+  return visited;
+}
+
+function isBackgroundPixel(imageData: ImageData, pixel: number, backgroundColors: RgbColor[]) {
+  const index = pixel * 4;
+  const data = imageData.data;
+  const color = { r: data[index], g: data[index + 1], b: data[index + 2] };
+  const max = Math.max(color.r, color.g, color.b);
+  const min = Math.min(color.r, color.g, color.b);
+  const average = (color.r + color.g + color.b) / 3;
+  if (average > CHECKER_LIGHT_THRESHOLD && max - min < CHECKER_NEUTRAL_THRESHOLD) return true;
+  return backgroundColors.some((background) => colorDistance(color, background) < 36);
+}
+
+function colorDistance(a: RgbColor, b: RgbColor) {
+  const r = a.r - b.r;
+  const g = a.g - b.g;
+  const bDiff = a.b - b.b;
+  return Math.sqrt(r * r + g * g + bDiff * bDiff);
+}
+
+function applyTransparency(imageData: ImageData, backgroundMask: Uint8Array, smoothEdges: boolean) {
+  const { data, width, height } = imageData;
+  for (let pixel = 0; pixel < backgroundMask.length; pixel += 1) {
+    if (backgroundMask[pixel]) data[pixel * 4 + 3] = 0;
+  }
+  if (!smoothEdges) return;
+  const nextAlpha = new Uint8ClampedArray(width * height);
+  for (let pixel = 0; pixel < nextAlpha.length; pixel += 1) nextAlpha[pixel] = data[pixel * 4 + 3];
+  for (let y = 1; y < height - 1; y += 1) {
+    for (let x = 1; x < width - 1; x += 1) {
+      const pixel = y * width + x;
+      if (backgroundMask[pixel]) continue;
+      const touchesBackground = backgroundMask[pixel - 1] || backgroundMask[pixel + 1] || backgroundMask[pixel - width] || backgroundMask[pixel + width];
+      if (touchesBackground) nextAlpha[pixel] = Math.min(nextAlpha[pixel], 225);
+    }
+  }
+  for (let pixel = 0; pixel < nextAlpha.length; pixel += 1) data[pixel * 4 + 3] = nextAlpha[pixel];
+}
+
+function trimTransparentPixels(imageData: ImageData) {
+  const { data, width, height } = imageData;
+  let minX = width, minY = height, maxX = -1, maxY = -1;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (data[(y * width + x) * 4 + 3] === 0) continue;
+      minX = Math.min(minX, x); minY = Math.min(minY, y); maxX = Math.max(maxX, x); maxY = Math.max(maxY, y);
+    }
+  }
+  if (maxX < minX || maxY < minY) return imageDataToCanvas(imageData);
+  const output = document.createElement('canvas');
+  output.width = maxX - minX + 1;
+  output.height = maxY - minY + 1;
+  const context = output.getContext('2d');
+  if (!context) return output;
+  context.putImageData(imageData, -minX, -minY);
+  return output;
+}
+
+function imageDataToCanvas(imageData: ImageData) {
+  const canvas = document.createElement('canvas');
+  canvas.width = imageData.width;
+  canvas.height = imageData.height;
+  canvas.getContext('2d')?.putImageData(imageData, 0, 0);
+  return canvas;
+}
+
+async function generateDownloadBlob(imageUrl: string, format: DownloadFormat): Promise<Blob> { const image = await loadImage(imageUrl); const canvas = document.createElement('canvas'); canvas.width = image.naturalWidth || image.width; canvas.height = image.naturalHeight || image.height; const context = canvas.getContext('2d'); if (!context) throw new Error('Canvas를 생성할 수 없습니다.'); if (format === 'jpg') { context.fillStyle = '#ffffff'; context.fillRect(0, 0, canvas.width, canvas.height); } context.drawImage(image, 0, 0); const mimeType = format === 'jpg' ? 'image/jpeg' : `image/${format}`; return imageDataToBlob(canvas, mimeType, 0.95); }
 async function generateQRCode(downloadUrl: string): Promise<string> {
   // TODO: 운영 환경에서는 서버 저장 URL을 표준 QR 라이브러리 또는 백엔드에서 생성한 QR 이미지로 교체합니다.
   return `https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(downloadUrl)}`;
@@ -155,7 +292,7 @@ function LandingPage() {
         <div className="flex flex-col justify-center">
           <span className="w-fit rounded-full bg-blue-100 px-4 py-2 text-sm font-semibold text-blue-700">QR 모바일 저장 특화 MVP</span>
           <h1 className="mt-6 text-4xl font-extrabold tracking-tight md:text-6xl">AI 배경 제거 후, 모바일 저장까지 한 번에</h1>
-          <p className="mt-5 text-lg leading-8 text-slate-600">이미지를 업로드하면 mock AI 흐름으로 배경 제거 결과를 만들고 PNG/WebP/JPG 다운로드와 QR코드 모바일 저장 링크를 제공합니다.</p>
+          <p className="mt-5 text-lg leading-8 text-slate-600">이미지를 업로드하면 가장자리 배경색과 체크무늬 배경을 감지해 실제 투명 PNG 결과를 만들고 PNG/WebP/JPG 다운로드와 QR코드 모바일 저장 링크를 제공합니다.</p>
           <div className="mt-8 flex flex-wrap gap-3">
             <a href="#upload" className="rounded-2xl bg-blue-600 px-6 py-4 font-bold text-white shadow-lg shadow-blue-200">이미지 업로드하기</a>
             <button onClick={() => createSample(handleFile)} className="rounded-2xl border border-slate-200 bg-white px-6 py-4 font-bold text-slate-800">샘플 이미지로 체험하기</button>
@@ -230,7 +367,7 @@ function CompareSlider({ originalUrl, resultUrl, background, zoom }: { originalU
 }
 
 function BackgroundPreviewToggle({ value, onChange, zoom, onZoom }: { value: BackgroundMode; onChange: (value: BackgroundMode) => void; zoom: boolean; onZoom: (value: boolean) => void }) {
-  return <div className="rounded-3xl bg-white p-4 shadow"><h2 className="font-bold">배경 미리보기</h2><div className="mt-3 flex flex-wrap gap-2">{(['transparent', 'white', 'black'] as BackgroundMode[]).map((mode) => <button key={mode} onClick={() => onChange(mode)} className={`rounded-xl px-4 py-2 font-bold ${value === mode ? 'bg-blue-600 text-white' : 'bg-slate-100'}`}>{mode === 'transparent' ? '투명 체크무늬' : mode === 'white' ? '흰 배경' : '검은 배경'}</button>)}<button onClick={() => onZoom(!zoom)} className="rounded-xl bg-slate-900 px-4 py-2 font-bold text-white">확대해서 가장자리 확인</button></div></div>;
+  return <div className="rounded-3xl bg-white p-4 shadow"><h2 className="font-bold">배경 미리보기</h2><div className="mt-3 flex flex-wrap gap-2">{(['transparent', 'white', 'black'] as BackgroundMode[]).map((mode) => <button key={mode} onClick={() => onChange(mode)} className={`rounded-xl px-4 py-2 font-bold ${value === mode ? 'bg-blue-600 text-white' : 'bg-slate-100'}`}>{mode === 'transparent' ? '투명(체크무늬 미리보기)' : mode === 'white' ? '흰 배경' : '검은 배경'}</button>)}<button onClick={() => onZoom(!zoom)} className="rounded-xl bg-slate-900 px-4 py-2 font-bold text-white">확대해서 가장자리 확인</button></div></div>;
 }
 
 function EditToolbar({ onAction }: { onAction: (label: string) => void }) {
@@ -244,7 +381,7 @@ function DownloadPanel({ record, onComplete }: { record: ResultRecord; onComplet
     downloadBlob(blob, `${baseName}-background-removed.${format}`);
     onComplete();
   };
-  return <section className="rounded-3xl bg-white p-5 shadow"><h2 className="text-xl font-extrabold">다운로드</h2><div className="mt-4 grid gap-3"> <button onClick={() => handleDownload('png')} className="rounded-2xl bg-blue-600 px-5 py-3 font-bold text-white">PNG 투명 배경 다운로드</button><button onClick={() => handleDownload('webp')} className="rounded-2xl bg-slate-900 px-5 py-3 font-bold text-white">WebP 다운로드</button><button onClick={() => handleDownload('jpg')} className="rounded-2xl bg-white px-5 py-3 font-bold text-slate-900 ring-1 ring-slate-200">JPG 흰 배경 다운로드</button><button disabled className="cursor-not-allowed rounded-2xl bg-slate-100 px-5 py-3 font-bold text-slate-500" title="다중 업로드 시 사용 가능합니다.">ZIP 다운로드 · 다중 업로드 시 사용 가능</button></div></section>;
+  return <section className="rounded-3xl bg-white p-5 shadow"><h2 className="text-xl font-extrabold">다운로드</h2><p className="mt-2 text-sm text-slate-500">투명 미리보기의 체크무늬는 파일에 저장되지 않습니다.</p><div className="mt-4 grid gap-3"> <button onClick={() => handleDownload('png')} className="rounded-2xl bg-blue-600 px-5 py-3 font-bold text-white">PNG 투명 배경 다운로드</button><button onClick={() => handleDownload('webp')} className="rounded-2xl bg-slate-900 px-5 py-3 font-bold text-white">WebP 다운로드</button><button onClick={() => handleDownload('jpg')} className="rounded-2xl bg-white px-5 py-3 font-bold text-slate-900 ring-1 ring-slate-200">JPG 흰 배경 다운로드</button><button disabled className="cursor-not-allowed rounded-2xl bg-slate-100 px-5 py-3 font-bold text-slate-500" title="다중 업로드 시 사용 가능합니다.">ZIP 다운로드 · 다중 업로드 시 사용 가능</button></div></section>;
 }
 
 function QRDownloadPanel({ record }: { record: ResultRecord }) {
@@ -283,7 +420,7 @@ function createSample(onFile: (file: File) => void) {
   if (!ctx) return;
   ctx.fillStyle = '#dbeafe';
   ctx.fillRect(0, 0, 900, 600);
-  ctx.fillStyle = '#2563eb';
+  ctx.fillStyle = '#f97316';
   ctx.beginPath();
   ctx.arc(450, 260, 120, 0, Math.PI * 2);
   ctx.fill();

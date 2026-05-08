@@ -15,25 +15,184 @@ function validateFile(file) {
     return null;
 }
 const wait = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+const BACKGROUND_SAMPLE_STRIDE = 6;
+const BACKGROUND_COLOR_BUCKET = 16;
+const CHECKER_LIGHT_THRESHOLD = 220;
+const CHECKER_NEUTRAL_THRESHOLD = 22;
 async function removeBackground(file, options, onStageChange) {
     const steps = [
         { stage: 'uploading', delay: 700 }, { stage: 'analyzing', delay: 900 }, { stage: 'removing', delay: 1100 }, { stage: 'generating', delay: 800 },
     ];
+    let resultUrl = '';
     for (const step of steps) {
         onStageChange?.(step.stage);
+        if (step.stage === 'removing')
+            resultUrl = await removeBackgroundLocally(file, options);
         await wait(step.delay);
     }
-    // TODO: 실제 서비스에서는 이 지점에서 AI 배경 제거 API를 호출하고 서버 저장 URL을 반환합니다.
-    void options;
     onStageChange?.('done');
-    return URL.createObjectURL(file);
+    return resultUrl;
 }
 function loadImage(imageUrl) { return new Promise((resolve, reject) => { const image = new Image(); image.crossOrigin = 'anonymous'; image.onload = () => resolve(image); image.onerror = () => reject(new Error('이미지를 불러오지 못했습니다.')); image.src = imageUrl; }); }
+async function loadFileImage(file) { const url = URL.createObjectURL(file); try {
+    return await loadImage(url);
+}
+finally {
+    URL.revokeObjectURL(url);
+} }
+function imageDataToBlob(canvas, type = 'image/png', quality) { return new Promise((resolve, reject) => { canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error('이미지 파일 생성에 실패했습니다.')), type, quality); }); }
+async function removeBackgroundLocally(file, options) {
+    const image = await loadFileImage(file);
+    const sourceCanvas = document.createElement('canvas');
+    sourceCanvas.width = image.naturalWidth || image.width;
+    sourceCanvas.height = image.naturalHeight || image.height;
+    const sourceContext = sourceCanvas.getContext('2d');
+    if (!sourceContext)
+        throw new Error('Canvas를 생성할 수 없습니다.');
+    sourceContext.drawImage(image, 0, 0);
+    const imageData = sourceContext.getImageData(0, 0, sourceCanvas.width, sourceCanvas.height);
+    const backgroundColors = detectBackgroundColors(imageData);
+    const backgroundMask = createBackgroundMask(imageData, backgroundColors);
+    applyTransparency(imageData, backgroundMask, options.smoothEdges);
+    const outputCanvas = options.autoTrim && !options.keepOriginalSize ? trimTransparentPixels(imageData) : sourceCanvas;
+    const outputContext = outputCanvas.getContext('2d');
+    if (!outputContext)
+        throw new Error('Canvas를 생성할 수 없습니다.');
+    if (outputCanvas === sourceCanvas) {
+        outputContext.putImageData(imageData, 0, 0);
+    }
+    const blob = await imageDataToBlob(outputCanvas);
+    return URL.createObjectURL(blob);
+}
+function detectBackgroundColors(imageData) {
+    const { data, width, height } = imageData;
+    const counts = new Map();
+    const addSample = (x, y) => {
+        const index = (y * width + x) * 4;
+        const color = { r: data[index], g: data[index + 1], b: data[index + 2] };
+        const key = `${Math.round(color.r / BACKGROUND_COLOR_BUCKET)},${Math.round(color.g / BACKGROUND_COLOR_BUCKET)},${Math.round(color.b / BACKGROUND_COLOR_BUCKET)}`;
+        const current = counts.get(key);
+        counts.set(key, { color, count: (current?.count || 0) + 1 });
+    };
+    for (let x = 0; x < width; x += BACKGROUND_SAMPLE_STRIDE) {
+        addSample(x, 0);
+        addSample(x, height - 1);
+    }
+    for (let y = 0; y < height; y += BACKGROUND_SAMPLE_STRIDE) {
+        addSample(0, y);
+        addSample(width - 1, y);
+    }
+    return [...counts.values()].sort((a, b) => b.count - a.count).slice(0, 8).map(({ color }) => color);
+}
+function createBackgroundMask(imageData, backgroundColors) {
+    const { width, height } = imageData;
+    const visited = new Uint8Array(width * height);
+    const queue = [];
+    const enqueue = (x, y) => {
+        if (x < 0 || y < 0 || x >= width || y >= height)
+            return;
+        const pixel = y * width + x;
+        if (visited[pixel] || !isBackgroundPixel(imageData, pixel, backgroundColors))
+            return;
+        visited[pixel] = 1;
+        queue.push(pixel);
+    };
+    for (let x = 0; x < width; x += 1) {
+        enqueue(x, 0);
+        enqueue(x, height - 1);
+    }
+    for (let y = 0; y < height; y += 1) {
+        enqueue(0, y);
+        enqueue(width - 1, y);
+    }
+    for (let cursor = 0; cursor < queue.length; cursor += 1) {
+        const pixel = queue[cursor];
+        const x = pixel % width;
+        const y = Math.floor(pixel / width);
+        enqueue(x + 1, y);
+        enqueue(x - 1, y);
+        enqueue(x, y + 1);
+        enqueue(x, y - 1);
+    }
+    return visited;
+}
+function isBackgroundPixel(imageData, pixel, backgroundColors) {
+    const index = pixel * 4;
+    const data = imageData.data;
+    const color = { r: data[index], g: data[index + 1], b: data[index + 2] };
+    const max = Math.max(color.r, color.g, color.b);
+    const min = Math.min(color.r, color.g, color.b);
+    const average = (color.r + color.g + color.b) / 3;
+    if (average > CHECKER_LIGHT_THRESHOLD && max - min < CHECKER_NEUTRAL_THRESHOLD)
+        return true;
+    return backgroundColors.some((background) => colorDistance(color, background) < 36);
+}
+function colorDistance(a, b) {
+    const r = a.r - b.r;
+    const g = a.g - b.g;
+    const bDiff = a.b - b.b;
+    return Math.sqrt(r * r + g * g + bDiff * bDiff);
+}
+function applyTransparency(imageData, backgroundMask, smoothEdges) {
+    const { data, width, height } = imageData;
+    for (let pixel = 0; pixel < backgroundMask.length; pixel += 1) {
+        if (backgroundMask[pixel])
+            data[pixel * 4 + 3] = 0;
+    }
+    if (!smoothEdges)
+        return;
+    const nextAlpha = new Uint8ClampedArray(width * height);
+    for (let pixel = 0; pixel < nextAlpha.length; pixel += 1)
+        nextAlpha[pixel] = data[pixel * 4 + 3];
+    for (let y = 1; y < height - 1; y += 1) {
+        for (let x = 1; x < width - 1; x += 1) {
+            const pixel = y * width + x;
+            if (backgroundMask[pixel])
+                continue;
+            const touchesBackground = backgroundMask[pixel - 1] || backgroundMask[pixel + 1] || backgroundMask[pixel - width] || backgroundMask[pixel + width];
+            if (touchesBackground)
+                nextAlpha[pixel] = Math.min(nextAlpha[pixel], 225);
+        }
+    }
+    for (let pixel = 0; pixel < nextAlpha.length; pixel += 1)
+        data[pixel * 4 + 3] = nextAlpha[pixel];
+}
+function trimTransparentPixels(imageData) {
+    const { data, width, height } = imageData;
+    let minX = width, minY = height, maxX = -1, maxY = -1;
+    for (let y = 0; y < height; y += 1) {
+        for (let x = 0; x < width; x += 1) {
+            if (data[(y * width + x) * 4 + 3] === 0)
+                continue;
+            minX = Math.min(minX, x);
+            minY = Math.min(minY, y);
+            maxX = Math.max(maxX, x);
+            maxY = Math.max(maxY, y);
+        }
+    }
+    if (maxX < minX || maxY < minY)
+        return imageDataToCanvas(imageData);
+    const output = document.createElement('canvas');
+    output.width = maxX - minX + 1;
+    output.height = maxY - minY + 1;
+    const context = output.getContext('2d');
+    if (!context)
+        return output;
+    context.putImageData(imageData, -minX, -minY);
+    return output;
+}
+function imageDataToCanvas(imageData) {
+    const canvas = document.createElement('canvas');
+    canvas.width = imageData.width;
+    canvas.height = imageData.height;
+    canvas.getContext('2d')?.putImageData(imageData, 0, 0);
+    return canvas;
+}
 async function generateDownloadBlob(imageUrl, format) { const image = await loadImage(imageUrl); const canvas = document.createElement('canvas'); canvas.width = image.naturalWidth || image.width; canvas.height = image.naturalHeight || image.height; const context = canvas.getContext('2d'); if (!context)
     throw new Error('Canvas를 생성할 수 없습니다.'); if (format === 'jpg') {
     context.fillStyle = '#ffffff';
     context.fillRect(0, 0, canvas.width, canvas.height);
-} context.drawImage(image, 0, 0); const mimeType = format === 'jpg' ? 'image/jpeg' : `image/${format}`; return new Promise((resolve, reject) => { canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error('다운로드 파일 생성에 실패했습니다.')), mimeType, 0.95); }); }
+} context.drawImage(image, 0, 0); const mimeType = format === 'jpg' ? 'image/jpeg' : `image/${format}`; return imageDataToBlob(canvas, mimeType, 0.95); }
 async function generateQRCode(downloadUrl) {
     // TODO: 운영 환경에서는 서버 저장 URL을 표준 QR 라이브러리 또는 백엔드에서 생성한 QR 이미지로 교체합니다.
     return `https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(downloadUrl)}`;
@@ -143,7 +302,7 @@ function LandingPage() {
             React.createElement("div", { className: "flex flex-col justify-center" },
                 React.createElement("span", { className: "w-fit rounded-full bg-blue-100 px-4 py-2 text-sm font-semibold text-blue-700" }, "QR \uBAA8\uBC14\uC77C \uC800\uC7A5 \uD2B9\uD654 MVP"),
                 React.createElement("h1", { className: "mt-6 text-4xl font-extrabold tracking-tight md:text-6xl" }, "AI \uBC30\uACBD \uC81C\uAC70 \uD6C4, \uBAA8\uBC14\uC77C \uC800\uC7A5\uAE4C\uC9C0 \uD55C \uBC88\uC5D0"),
-                React.createElement("p", { className: "mt-5 text-lg leading-8 text-slate-600" }, "\uC774\uBBF8\uC9C0\uB97C \uC5C5\uB85C\uB4DC\uD558\uBA74 mock AI \uD750\uB984\uC73C\uB85C \uBC30\uACBD \uC81C\uAC70 \uACB0\uACFC\uB97C \uB9CC\uB4E4\uACE0 PNG/WebP/JPG \uB2E4\uC6B4\uB85C\uB4DC\uC640 QR\uCF54\uB4DC \uBAA8\uBC14\uC77C \uC800\uC7A5 \uB9C1\uD06C\uB97C \uC81C\uACF5\uD569\uB2C8\uB2E4."),
+                React.createElement("p", { className: "mt-5 text-lg leading-8 text-slate-600" }, "\uC774\uBBF8\uC9C0\uB97C \uC5C5\uB85C\uB4DC\uD558\uBA74 \uAC00\uC7A5\uC790\uB9AC \uBC30\uACBD\uC0C9\uACFC \uCCB4\uD06C\uBB34\uB2AC \uBC30\uACBD\uC744 \uAC10\uC9C0\uD574 \uC2E4\uC81C \uD22C\uBA85 PNG \uACB0\uACFC\uB97C \uB9CC\uB4E4\uACE0 PNG/WebP/JPG \uB2E4\uC6B4\uB85C\uB4DC\uC640 QR\uCF54\uB4DC \uBAA8\uBC14\uC77C \uC800\uC7A5 \uB9C1\uD06C\uB97C \uC81C\uACF5\uD569\uB2C8\uB2E4."),
                 React.createElement("div", { className: "mt-8 flex flex-wrap gap-3" },
                     React.createElement("a", { href: "#upload", className: "rounded-2xl bg-blue-600 px-6 py-4 font-bold text-white shadow-lg shadow-blue-200" }, "\uC774\uBBF8\uC9C0 \uC5C5\uB85C\uB4DC\uD558\uAE30"),
                     React.createElement("button", { onClick: () => createSample(handleFile), className: "rounded-2xl border border-slate-200 bg-white px-6 py-4 font-bold text-slate-800" }, "\uC0D8\uD50C \uC774\uBBF8\uC9C0\uB85C \uCCB4\uD5D8\uD558\uAE30")),
@@ -245,7 +404,7 @@ function BackgroundPreviewToggle({ value, onChange, zoom, onZoom }) {
     return React.createElement("div", { className: "rounded-3xl bg-white p-4 shadow" },
         React.createElement("h2", { className: "font-bold" }, "\uBC30\uACBD \uBBF8\uB9AC\uBCF4\uAE30"),
         React.createElement("div", { className: "mt-3 flex flex-wrap gap-2" },
-            ['transparent', 'white', 'black'].map((mode) => React.createElement("button", { key: mode, onClick: () => onChange(mode), className: `rounded-xl px-4 py-2 font-bold ${value === mode ? 'bg-blue-600 text-white' : 'bg-slate-100'}` }, mode === 'transparent' ? '투명 체크무늬' : mode === 'white' ? '흰 배경' : '검은 배경')),
+            ['transparent', 'white', 'black'].map((mode) => React.createElement("button", { key: mode, onClick: () => onChange(mode), className: `rounded-xl px-4 py-2 font-bold ${value === mode ? 'bg-blue-600 text-white' : 'bg-slate-100'}` }, mode === 'transparent' ? '투명(체크무늬 미리보기)' : mode === 'white' ? '흰 배경' : '검은 배경')),
             React.createElement("button", { onClick: () => onZoom(!zoom), className: "rounded-xl bg-slate-900 px-4 py-2 font-bold text-white" }, "\uD655\uB300\uD574\uC11C \uAC00\uC7A5\uC790\uB9AC \uD655\uC778")));
 }
 function EditToolbar({ onAction }) {
@@ -262,6 +421,7 @@ function DownloadPanel({ record, onComplete }) {
     };
     return React.createElement("section", { className: "rounded-3xl bg-white p-5 shadow" },
         React.createElement("h2", { className: "text-xl font-extrabold" }, "\uB2E4\uC6B4\uB85C\uB4DC"),
+        React.createElement("p", { className: "mt-2 text-sm text-slate-500" }, "\uD22C\uBA85 \uBBF8\uB9AC\uBCF4\uAE30\uC758 \uCCB4\uD06C\uBB34\uB2AC\uB294 \uD30C\uC77C\uC5D0 \uC800\uC7A5\uB418\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4."),
         React.createElement("div", { className: "mt-4 grid gap-3" },
             " ",
             React.createElement("button", { onClick: () => handleDownload('png'), className: "rounded-2xl bg-blue-600 px-5 py-3 font-bold text-white" }, "PNG \uD22C\uBA85 \uBC30\uACBD \uB2E4\uC6B4\uB85C\uB4DC"),
@@ -331,7 +491,7 @@ function createSample(onFile) {
         return;
     ctx.fillStyle = '#dbeafe';
     ctx.fillRect(0, 0, 900, 600);
-    ctx.fillStyle = '#2563eb';
+    ctx.fillStyle = '#f97316';
     ctx.beginPath();
     ctx.arc(450, 260, 120, 0, Math.PI * 2);
     ctx.fill();
