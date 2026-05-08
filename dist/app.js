@@ -196,14 +196,18 @@ function updateStoredRecord(record) {
 }
 function saveVault(user) { const batch = readBatch(); localStorage.setItem('make-real-png:user', JSON.stringify(user)); localStorage.setItem(`make-real-png:vault:${user.email}`, JSON.stringify(batch)); }
 function downloadBlob(blob, fileName) { const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = fileName; anchor.click(); URL.revokeObjectURL(url); }
-function Link({ to, className, children }) { return React.createElement("a", { href: to, className: className, onClick: (event) => { event.preventDefault(); window.dispatchEvent(new CustomEvent('app:navigate', { detail: to })); } }, children); }
-function useNavigate() { return (to) => window.dispatchEvent(new CustomEvent('app:navigate', { detail: to })); }
-function useParams() { const match = window.location.pathname.match(/\/mobile-download\/([^/]+)/); return { id: match?.[1] }; }
+const APP_BASENAME = window.location.pathname.split('/').filter(Boolean)[0] === 'make-real-png' ? '/make-real-png' : '';
+function toAppPath(pathname) { const path = pathname.startsWith(APP_BASENAME) ? pathname.slice(APP_BASENAME.length) || '/' : pathname; return path.startsWith('/') ? path : `/${path}`; }
+function toBrowserPath(appPath) { const normalizedPath = appPath.startsWith('/') ? appPath : `/${appPath}`; return `${APP_BASENAME}${normalizedPath === '/' ? '/' : normalizedPath}`; }
+function navigateTo(to) { window.dispatchEvent(new CustomEvent('app:navigate', { detail: to })); }
+function Link({ to, className, children }) { return React.createElement("a", { href: toBrowserPath(to), className: className, onClick: (event) => { event.preventDefault(); navigateTo(to); } }, children); }
+function useNavigate() { return navigateTo; }
+function useParams() { const match = toAppPath(window.location.pathname).match(/\/mobile-download\/([^/]+)/); return { id: match?.[1] }; }
 function App() {
-    const [path, setPath] = React.useState(window.location.pathname);
+    const [path, setPath] = React.useState(toAppPath(window.location.pathname));
     React.useEffect(() => {
-        const onNavigate = (event) => { const to = event.detail; window.history.pushState({}, '', to); setPath(window.location.pathname); };
-        const onPop = () => setPath(window.location.pathname);
+        const onNavigate = (event) => { const to = event.detail; window.history.pushState({}, '', toBrowserPath(to)); setPath(toAppPath(window.location.pathname)); };
+        const onPop = () => setPath(toAppPath(window.location.pathname));
         window.addEventListener('app:navigate', onNavigate);
         window.addEventListener('popstate', onPop);
         return () => { window.removeEventListener('app:navigate', onNavigate); window.removeEventListener('popstate', onPop); };
@@ -497,7 +501,7 @@ function crc32(data) { let crc = -1; for (const byte of data) {
     for (let bit = 0; bit < 8; bit += 1)
         crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
 } return (crc ^ -1) >>> 0; }
-function QRDownloadPanel({ record }) { const [qr, setQr] = React.useState(''); const mobileUrl = React.useMemo(() => `${window.location.origin}/mobile-download/${record.id}`, [record.id]); const createQr = async () => setQr(await generateQRCode(mobileUrl)); return React.createElement("section", { className: "rounded-3xl bg-white p-5 shadow" },
+function QRDownloadPanel({ record }) { const [qr, setQr] = React.useState(''); const mobileUrl = React.useMemo(() => `${window.location.origin}${toBrowserPath(`/mobile-download/${record.id}`)}`, [record.id]); const createQr = async () => setQr(await generateQRCode(mobileUrl)); return React.createElement("section", { className: "rounded-3xl bg-white p-5 shadow" },
     React.createElement("h2", { className: "text-xl font-extrabold" }, "QR \uBAA8\uBC14\uC77C \uC800\uC7A5"),
     React.createElement("p", { className: "mt-2 text-sm text-slate-500" }, "\uBAA8\uBC14\uC77C\uC5D0\uC11C QR\uCF54\uB4DC\uB97C \uC2A4\uCE94\uD558\uBA74 \uC120\uD0DD\uD55C \uACB0\uACFC \uC774\uBBF8\uC9C0\uB97C \uC800\uC7A5\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4."),
     React.createElement("button", { onClick: createQr, className: "mt-4 w-full rounded-2xl bg-emerald-600 px-5 py-3 font-bold text-white" }, "QR\uCF54\uB4DC \uC0DD\uC131"),
